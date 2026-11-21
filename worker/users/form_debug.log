@@ -1,0 +1,52 @@
+Array
+(
+    [uid] => 1
+    [district_name] => 27
+    [project] => 320
+    [grameen_sehri] => 2
+    [gram_panchayat] => 26096
+    [nya_panchyat] => Test
+    [rikt_aww_center] => 1055690
+    [applicant_name] => Pooja
+    [applicant_name_en] => Pooja
+    [father_name] => HLM
+    [mother_name] => Sharda
+    [marital_status] => 2
+    [husband_name] => 
+    [permanent_full_address] => test
+    [mailing_full_address] => test mailing
+    [permanent_full_address_pincode] => 123123
+    [mailing_full_address_pincode] => 123122
+    [dob] => 1990-02-01
+    [year] => 35
+    [month] => 3
+    [day] => 2
+    [old_h_marksheet] => ../newuploads/1/6815bae75ef13_step-5.png
+    [save1] => submit
+)
+Array
+(
+    [uid] => 1
+    [district_name] => 27
+    [project] => 320
+    [grameen_sehri] => 2
+    [gram_panchayat] => 26096
+    [nya_panchyat] => Test
+    [rikt_aww_center] => 1055690
+    [applicant_name] => Pooja
+    [applicant_name_en] => Pooja
+    [father_name] => HLM
+    [mother_name] => Sharda
+    [marital_status] => 2
+    [husband_name] => 
+    [permanent_full_address] => test
+    [mailing_full_address] => test mailing
+    [permanent_full_address_pincode] => 123123
+    [mailing_full_address_pincode] => 123122
+    [dob] => 1990-09-06
+    [year] => 34
+    [month] => 7
+    [day] => 27
+    [old_h_marksheet] => ../newuploads/1/6815bae75ef13_step-5.png
+    [save1] => submit
+)

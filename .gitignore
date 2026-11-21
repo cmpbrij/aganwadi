@@ -1,0 +1,25 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+error_log
+
+# Dependencies
+/vendor/
+/node_modules/
+
+# Cache and temporary files
+/cache/
+/tmp/
+/temp/
+
+# Backup files
+*.bak
+*.old
+*.backup

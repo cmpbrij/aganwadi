@@ -1,0 +1,450 @@
+<!doctype html>
+<!-- <html lang="en"> -->
+<html>
+
+<!-- Mirrored from apps.bhatkhandeuniversity.ac.in/student/login by HTTrack Website Copier/3.x [XR&CO'2014], Sun, 28 Jan 2024 14:20:20 GMT -->
+<!-- Added by HTTrack --><meta http-equiv="content-type" content="text/html;charset=UTF-8" /><!-- /Added by HTTrack -->
+<head>
+    <title>Login : Anganwadi Recruitment, Uttar Pradesh</title>
+    <meta charset="utf-8">
+    
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta name="csrf-token" content="O9mUTOIwJ98dHE8ncyPuGeXHGQNe6Ctjpf9lCdBX" />
+     <link rel="shortcut icon" href="../public/images/favicon.png" />
+	<link href="../public/css/bootstrap.css" rel='stylesheet' />	
+    <link href="../public/css/all.css" rel="stylesheet" />
+    <link href="../public/css/custom_theme_student.css" rel="stylesheet" />
+	<!-- <link href="https://apps.bhatkhandeuniversity.ac.in/public/css/default.css" rel="stylesheet" /> -->
+	<link href="../public/css/responsive.css" rel="stylesheet" />
+  <link href="../public/css/select2.min.css" rel="stylesheet" />
+	<script type="text/javascript" src="../public/js/jquery-min.js"></script>
+  <link href="../public/css/js_latest_toastr.min.css" rel="stylesheet" />
+  <style>
+    .loader {
+  width: 48px ;
+  height: 48px;
+  border: 2px solid #128cbc;
+  border-radius: 50%;
+  display: inline-block;
+  position: absolute ;
+  box-sizing: border-box;
+  animation: rotation 1s linear infinite;
+  z-index: 9999999999;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%)
+}
+.loader::after,
+.loader::before {
+  content: '';  
+  box-sizing: border-box;
+  position: absolute;
+  left: 0;
+  top: 0;
+  background: #FF3D00;
+  width: 6px;
+  height: 6px;
+  transform: translate(150%, 150%);
+  border-radius: 50%;
+}
+.loader::before {
+  left: auto;
+  top: auto;
+  right: 0;
+  bottom: 0;
+  transform: translate(-150%, -150%);
+}
+
+@keyframes  rotation {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+.screen{
+position: fixed;
+top: 0;
+left: 0;
+right: 0;
+bottom: 0;
+display: flex;
+align-items: center;
+backdrop-filter: blur(1.5px);
+z-index: 99999;
+}
+  </style>
+</head>
+   <body>
+   <div class="screen" style="display: none">
+      <span class="loader"></span>
+   </div>
+   <div class="container-fluid">
+   <!-- <a href="#" title="Instruction" class="help" data-bs-toggle="modal" data-bs-target="#myModal"> -->
+   </span class="item">
+      <!-- <img src="../public/images/instruction.png" //> -->
+      <!-- </span> -->
+      <!-- <div class="circle" style="animation-delay: 0s"></div>
+      <div class="circle" style="animation-delay: 1s"></div>
+      <div class="circle" style="animation-delay: 2s"></div>
+      <div class="circle" style="animation-delay: 3s"></div> -->
+   <!-- </a> -->
+   <div class="row">
+   <div class="col-md-8 loginsidebar" style="display: flex;align-items: center;justify-content: center;background-image: url(../public/images/background-image.jpg);background;background-repeat: no-repeat;  background-size: 100%;
+  padding-top: 25px; ">
+      <div class="row justify-content-center align-items-center">
+         <div class="col-3 col-lg-3">
+            <img src="../public/images/logo.png" class="img-fluid" style="filter: invert(1);height: 20vh"/>
+         </div>
+         <div class="deptname" style="" >
+            <h5 style="font-weight: 900 !important; font-size: 45px;">Anganwadi Recruitment 2024</h5>
+            <h3 style="color: white !important;font-weight: 800 !important; font-size: 24px; ">Uttar Pradesh, Lucknow</h3>
+			<h4 class="ums-name"></h4>
+            <!-- <img class="img-resp pos01" src="../public/images/output01.png" /> -->
+            <div class="pos02">
+               <div id="carouselExampleDark" class="carousel carousel-dark slide" data-bs-ride="carousel">
+                  <div class="carousel-inner">
+                     <div class="carousel-item active" data-bs-interval="2000">
+                        <!-- <img src="../public/images/output02.png" class="d-block w-100" alt="..."> -->
+                     </div>
+					 <div class="carousel-item" data-bs-interval="2000">
+                        <!-- <img src="../public/images/output030.png" class="d-block w-100" alt="..."> -->
+                     </div>
+                     <div class="carousel-item" data-bs-interval="2000">
+                        <!-- <img src="../public/images/indian-street-02-new.png" class="d-block w-100" alt="..."> -->
+                     </div>
+                  </div>
+               </div>
+            </div>
+         </div>
+      </div>
+   </div> 
+      
+            <div class="col">
+                <div class="p-4 p-lg-3 login-form d-flex flex-column justify-content-center align-items-center">
+                  <div class="text-center text-md-center mb-4 mt-md-0">
+                    <h3 class="mb-0" style="font-size: 30px;font-weight: 800;">Applicant Login</h3>
+                    <div class="d-flex justify-content-center align-items-center mt-2">                        
+                        <span class="fw-normal">Don’t have an Account?/अकाउंट नहीं है? <br> <a href="../app/registration.html" class="fw-bold">Click to Register/पंजीकरण हेतु क्लिक करें</a>
+					
+                        </span>
+						 
+                    </div> 
+                  </div>
+                  <form action="student_dashboard.html" method="post"  class="mt-4 needs-validation" novalidate>
+                    <input type="hidden" name="_token" value="O9mUTOIwJ98dHE8ncyPuGeXHGQNe6Ctjpf9lCdBX"> 
+                    <div class="form-group mb-3">
+                        <label for="user_id" style="display: flex;font-weight: 700;">Mobile No./मोबाइल नंबर<span class="text-danger">*</span></label>
+                       <input type="text" class="form-control"  name="user_id" id="user_id"  required>
+                                          </div>
+                   
+                        
+                   <div class="form-group mb-4">
+                        <label for="password-field" style="display: flex;font-weight: 700;">Password/पासवर्ड<span class="text-danger">*</span></label>
+                      <input type="password"  class="form-control" id="password-field" maxlength="30" name="password" required="">
+                       <span toggle="#password-field" class="fa fa-fw fa-eye field-icon toggle-password"></span>
+                    
+                    </div>                   
+                       <div class="form-group">
+                        <div class="form-group">
+                            <div class="row">
+                                <div class="col-md-5 col-10">
+                                    <div class="captcha">
+                                        <label class="btn-block">Captcha/कैप्चा</label>
+									<!--span class="unselectable" id="p_refresh"></span-->
+										<img src="../public/images/captcha.jpg" alt="Captcha" title="Captcha">
+                                        <input name="captchacode" type="hidden" class="form-control captchacode unselectable h4" value="" readonly>
+										
+                                    </div>
+                                </div>
+                                <div class="col-md-1 col-2">
+                                    <div class="refresh"><a href="javascript:void(0)" title="Refresh Captcha"><span class="fas fa-redo"></span></a></div>
+                                </div>
+                                <div class="col-md-6 col-12">
+                                    <label style="display: flex;font-weight: 700;">Enter Captcha/कैप्चा भरें<span class="text-danger">*</span></label>
+                                    <input name="captcha" type="text" oninput="this.value = this.value.replace(/[^0-9]/g, '').replace(/(\..*)\./g, '$1');" maxlength="6" id="captcha-input" class="form-control" placeholder="Enter Captcha" required>
+                                  </div>
+                               
+                            </div>
+                        </div>
+						
+						
+                        <div class="clearfix"></div>                       
+                    </div>
+					
+                    <div class="d-grid mb-3"> 
+                        <button class="cstm-btn btn" type="submit">Login/लॉगिन करें</button></div>
+                    <div class="clearfix"></div>
+                      <div class="d-flex justify-content-sm-center align-items-top"> 
+                      <!-- <span class="fw-normal"><a href="forgot-password.html" class="fw-bold">Forgot Password?/पासवर्ड भूल गए?</a> -->
+                    </div>
+                 
+                     
+                  </form>
+                </div>
+              </div>
+   <script>
+     $(document).ready(function () {
+       
+        get_captcha();
+   })
+   $(".refresh").on("click", function () {
+    get_captcha();
+    });
+    function get_captcha()
+    {
+        $.ajax({
+            type: "GET",
+            url:"https://apps.bhatkhandeuniversity.ac.in/get-captcha",
+            dataType: "json",
+            success: function (res) {
+               
+                $("#p_refresh").html(res.Code1 +'+'+ res.Code2);
+                $(".captchacode").val(res.Code1 + res.Code2);
+              
+            },
+        });
+    }
+   </script>
+
+        <style>
+	.blockPage{z-index: 9999 !important;}
+	.blockUI{z-index: 9000 !important}
+</style>
+
+<div class="modal fade" id="myModal" tabindex="-1" aria-labelledby="exampleModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="exampleModalLabel">Instructions</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">					
+					<h4>Step 1 – Register on the Portal</h4>
+					  <ul>
+<li>To register on the University Management System as a student, navigate to the URL: <a href="../exam/registration.html" target="_blank">http://apps.bhatkhandeuniversity.ac.in/exam/registration</a> and choose your student category:<br>
+					  <ul class="list" style="
+    margin-left: 2em;
+">
+
+<li>A. 1st Semester Student</li>
+<li>B. 3rd Semester Student</li>
+ </ul>
+</li>
+<li>Upon selecting your category, proceed to input the required details in the corresponding fields:<br>
+					  <ul class="list" style="
+    margin-left: 2em;
+">
+
+<li>C. Associative Unit</li>
+<li>D. Programme</li>
+<li>E. Enrollment No. <i>(applicable for 3rd-semester students only)</i></li>
+<li>F. Student's Name</li>
+<li>G. Mobile No.</li>
+<li>H. Email ID</li>
+<li>I. Captcha</li>
+ </ul>
+</li>
+
+<li>Next, click on <b>Register</b> button.</li>
+<li>Following this, an OTP will be sent to the provided Mobile No. and Email ID for verification purpose. </li>
+<li>Once the verification process is successfully completed, your registration will be confirmed, and the system will share your login credentials (Registration No. and Password) to the registered Mobile No. and Email ID.</li>
+</ul>
+<br>
+<h4>Step 2 – Login to the Portal</h4>
+ <ul>
+
+<li>Input your Registration Number, Password, and Captcha into their designated fields, and then proceed by clicking the <b>Login</b> button. </li>
+<li>Following a successful login, students will seamlessly redirected to their individual dashboards.</li>
+</ul>
+<br>
+<h5>
+In case user <b>forgets password</b>, follow these steps:</h5> 
+<ul>
+<li>Locate and click on the Forgot Password? link positioned on the Login panel.</li>
+<li>Enter your Registration Number in the provided field and submit the request.</li>
+<li>Your current password will promptly be sent to your registered Mobile Number and Email ID.</li>
+
+</ul>
+
+					
+					
+                </div>
+				
+                <div class="modal-footer text-center">
+                   <a href="../public/uploads/INSTRUCTIONS/BSV_UMS_Enrollment_instructions.pdf" class="btn btn btn-outline-secondary" download><i class="fa fa-download" aria-hidden="true"></i> Download</a>
+                   <!-- <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button> -->
+                </div>
+            </div>
+        </div>
+    </div>
+<div class="modal fade" id="project_verifies" tabindex="-1" aria-labelledby="FeasibleLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form action="https://apps.bhatkhandeuniversity.ac.in/admin/alumni_form_verify" class="needs-validation" id="alumni_form_verify" novalidate method="post">
+			<input type="hidden" name="_token" value="O9mUTOIwJ98dHE8ncyPuGeXHGQNe6Ctjpf9lCdBX">                <div class="modal-header">
+                    <h5 class="modal-title" id="FeasibleLabel">Verify Application</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Remark<span class="text-danger">*</span></label>
+                        <textarea class="form-control" id="remark" rows="4" name="remark" required></textarea>
+                    </div>
+                </div>
+                <input type="hidden" class="app_form_id" name="app_form_id" id="app_form_id" />
+                <div class="modal-footer">                
+                    <button type="submit" class="btn btn-primary">Submit</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+	 
+     </div>
+        </div>
+    </div>
+    <footer>
+        <div class="row">
+            <div class="col-md-9">
+                <ul class="foot-list">
+                    <li>Copyright © Anganwadi Recruitment | Technical Helpline : +91-000000000, 0522-000000</li>
+                </ul>
+            </div>
+            <div class="col-md-3">
+                <ul class="foot-list">
+                    <!-- <li>Powered by <a href="#" target="_blank"></a></li> -->
+                </ul>
+            </div>
+        </div>
+    </footer>
+
+
+ 
+
+    <script type="text/javascript">
+      $.ajaxSetup({
+          headers: {
+              'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content')
+          }
+      });
+      </script>
+<script type="text/javascript" src="../public/js/bootstrap.js"></script>
+
+<script type="text/javascript" src="../public/js/select2.min.js"></script>
+<script type="text/javascript" src="../public/js/js_latest_toastr.min.js"></script>  
+<script>
+
+    $(".toggle-password").click(function () {
+        $(this).toggleClass("fa-eye fa-eye-slash");
+        var input = $($(this).attr("toggle"));
+        if (input.attr("type") == "password") {
+            input.attr("type", "text");
+        } else {
+            input.attr("type", "password");
+        }
+    });
+
+    // validation
+    (function() {
+  'use strict';
+  window.addEventListener('load', function() {
+    var forms = document.getElementsByClassName('needs-validation');
+    var validation = Array.prototype.filter.call(forms, function(form) {
+      form.addEventListener('submit', function(event) {
+        if (form.checkValidity() === false) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        form.classList.add('was-validated');
+      }, false);
+    });
+  }, false);
+})();
+
+$(document).ready(function () {
+
+  $(".alpha").keypress(function(e) {
+      return /[0-9 . ,a-z A-Z@ ]/i.test(event.key);
+    });
+    $(".num_digit").keypress(function(e) {
+      return /[0-9.]/i.test(event.key);
+    });
+    $(".str").keypress(function(e) {
+      return /[a-z A-Z .]/i.test(event.key);
+    });
+  $('.js-example-basic-single').select2();
+  $(".js-example-placeholder-single").select2({
+    placeholder: "- Select -" 
+});
+
+});
+</script>
+<script>
+function success(msg)
+{
+ toastr.options = {
+ "closeButton": false,
+ "debug": false,
+ "newestOnTop": true,
+ "progressBar": true,
+ "positionClass": "toast-top-right",
+ "preventDuplicates": false,
+ "showDuration": "300",
+ "hideDuration": "1000",
+ "timeOut": "3000",
+ "extendedTimeOut": "1000",
+ "showEasing": "swing",
+ "hideEasing": "linear",
+ "showMethod": "fadeIn",
+ "hideMethod": "fadeOut"
+}
+ toastr.success(msg);   
+}
+function error(msg)
+{
+ toastr.options = {
+ "closeButton": false,
+ "debug": false,
+ "newestOnTop": true,
+ "progressBar": true,
+ "positionClass": "toast-top-right",
+ "preventDuplicates": false,
+ "showDuration": "300",
+ "hideDuration": "2000",
+ "timeOut": "3000",
+ "extendedTimeOut": "1000",
+ "showEasing": "swing",
+ "hideEasing": "linear",
+ "showMethod": "fadeIn",
+ "hideMethod": "fadeOut"
+}
+ toastr.error(msg)
+}
+
+$(document)
+    .ajaxStart(function () {
+       $(".screen").show();
+    })
+    .ajaxStop(function () {
+      $(".screen").hide();
+    });
+ </script>  
+  <div class="modal fade" id="query_form_reply" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1" aria-labelledby="exampleModalLabels" aria-hidden="true">
+    <div class="modal-dialog modal-lg" id="prodiv" style="max-width: 1020px;">
+        <div class="modal-content" id="query_form_reply_append">
+            
+        </div>
+    </div>
+</div>
+
+
+
+ 
+</body>
+
+<!-- Mirrored from apps.bhatkhandeuniversity.ac.in/student/login by HTTrack Website Copier/3.x [XR&CO'2014], Sun, 28 Jan 2024 14:20:21 GMT -->
+</html>

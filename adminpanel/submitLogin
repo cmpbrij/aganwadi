@@ -1,0 +1,412 @@
+<?php
+
+include('../config/db_config.php');
+include'../config/sms-config.php';
+session_start();
+
+
+    if(isset($_POST['login'])){
+    // removes backslashes
+        $captcha=$_POST['captcha'];
+        $cstatus=json_decode(verifyCaptcha($captcha),true);
+        //print_r($cstatus); die;
+        if($cstatus['captcha_status'] ==407){
+    
+            $_SESSION['cerror']="Captcha Expired! Please refersh the page";
+            header('Location: index.php');
+            exit;
+        }
+        else if($cstatus['captcha_status'] ==400){
+        
+            $_SESSION['cerror']="Captcha Verification Failed!";
+            header('Location:index.php');
+            exit;
+        }
+        $uname = stripslashes($_REQUEST['uname']);
+       // echo $uname;
+     
+        //escapes special characters in a string
+        $uname = mysqli_real_escape_string($conn,$uname);
+        $pass =$_REQUEST['pass'];
+        $pass = mysqli_real_escape_string($conn,$pass);
+        $pass=md5($pass);
+       //echo $pass; die;
+        if(empty($uname) && empty($pass)){
+            $_SESSION['verror']="Required all feilds";
+            header('Location:index.php');
+        }
+
+       //echo $pass;
+
+        //$sql = "SELECT * FROM `admin_users` WHERE `userid`=? and `password`=?";
+      //  echo $sql; die;
+
+      $sql = "SELECT * FROM admin_users WHERE userid = ?";
+    //   echo"test";
+    //   echo $sql; die;
+      $stmt = $conn->prepare($sql);
+      $stmt->bind_param("s", $uname);
+      $stmt->execute();
+      $result = $stmt->get_result();
+    
+      
+      //echo $result->num_rows; die;
+        //echo $count; die;
+        if($result->num_rows > 0){
+            $row=$result->fetch_assoc();
+           
+            if($row['password'] == $pass){
+                $role=$row['user_type'];
+        //  print_r($role); die;
+              setcookie("uid", $row['userid'], time() + 900, "/", "", true, true);
+
+                $ip=get_client_ip();
+
+                 // Generate a new session identifier
+                $newSessionIdentifier = bin2hex(random_bytes(10));
+                //echo $newSessionIdentifier; die;
+
+                $stmt = $conn->prepare("UPDATE admin_users SET session_identifier = ? WHERE userid = ?");
+                $stmt->bind_param('ss',$newSessionIdentifier, $row['userid']);
+                $stmt->execute();
+                $_SESSION['session_identifier']=$newSessionIdentifier;
+
+
+              //  echo $_SESSION['session_identifier']; die;
+                if($role =='DPO'){
+                    $_SESSION['role'] = 'DPO';
+                    $_SESSION['adminid'] =$row['userid'];
+                    $_SESSION['distid'] =$row['district_id'];
+                    $_SESSION['sid'] =$row['id'];
+                    // $_SESSION['log'] = rand(16);
+                    $_SESSION['success']='Login Successfully!';
+                    $sql="INSERT INTO `admin_login_details`(`user_id`, `distid`, `date`, `user_type`,`ip`) VALUES ('".$uname."','".$row['district_id']."','".date('Y-m-d')."','DPO','".$ip."')";
+                    //echo $sql; die;
+                    execute_query($sql);
+
+                // echo $sql; die;
+                    header('Location: dashboard.php');
+                    
+                }
+                else if($role='admin'){
+                    $_SESSION['role'] = 'admin';
+                    $_SESSION['uid'] =$row['userid'];
+
+                // echo  $_SESSION['uid'] ; die;
+                    // $_SESSION['log'] = rand(16);
+                    //$_SESSION['success']='success';
+                    $sql="INSERT INTO `admin_login_details`(`user_id`, `distid`, `date`, `user_type`,`ip`) VALUES ('".$uname."','".$row['district_id']."','".date('Y-m-d')."','ADMIN','".$ip."')";
+                    execute_query($sql);
+                    //echo $sql; die;
+                    header('Location: admin_dashboard.php');
+                }
+            }
+            else{
+                $_SESSION['wpass'] = 'Wrong password';
+                header('Location: login.php');
+
+            }
+
+            exit();
+        }
+        else{
+            $_SESSION['warning']="Username Is wrong";
+          
+             header('Location: login.php');
+       // echo "Error Description: ", $conn -> error;
+        }
+
+    }
+    if(isset($_POST['changePass'])){
+        
+        $sql = "SELECT `password` FROM admin_users WHERE userid='".$_SESSION['adminid']."'";
+        $result = execute_query($sql);
+        $chk=isPasswordStrong($_POST['new_pass']);
+        if(!$chk){
+            $_SESSION['weekpass']="Password is week!";
+                   
+            header('Location: change_pass.php');
+            die;
+        }
+        if (mysqli_num_rows($result) > 0) {
+
+           
+            $oldpass=md5($_POST['old_pass']);
+            $newpass=md5($_POST['new_pass']);
+            $row = $result->fetch_assoc();
+            $stored_password = $row["password"];
+            
+            // Verify current password
+            if ($stored_password==$oldpass) {
+                $update_sql = "UPDATE admin_users SET password = ? WHERE userid = ?";
+                // Prepare the statement
+                $stmt = $conn->prepare($update_sql);
+                // Bind parameters
+                $stmt->bind_param("ss", $newpass, $_SESSION['adminid']);
+                // Execute the statement
+               $res= $stmt->execute();
+                if ($res) {
+                    $newSessionIdentifier = bin2hex(random_bytes(10));
+                    $stmt = $conn->prepare("UPDATE admin_users SET session_identifier = ? WHERE userid = ?");
+                    $stmt->bind_param('ss',$newSessionIdentifier, $_SESSION['adminid']);
+                    $stmt->execute();
+                    $_SESSION['success']="Password updated successfully";
+
+                    header('Location: change_pass.php');
+                } else {
+                    $_SESSION['error_in_change']="Error in password change";
+                   
+                    header('Location: change_pass.php');
+                    
+                }
+            } else {
+                $_SESSION['warning']="Old password not matched";
+               
+                header('Location:change_pass.php');
+            }
+        } else {
+            echo "User not found";
+        }
+
+
+
+    }
+
+
+    if(isset($_POST['adminchangePass'])){
+        $sql = "SELECT `password` FROM admin_users WHERE userid = ?";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("s", $_SESSION['uid']); 
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $chk=isPasswordStrong($_POST['new_pass']);
+        if(!$chk){
+            $_SESSION['weekpass']="Password is week!";
+            header('Location: admin_change_pass.php');
+            die;
+        }
+      
+        if ($result->num_rows > 0) {
+            $oldpass=md5($_POST['old_pass']);
+            $newpass=md5($_POST['new_pass']);
+            $row = $result->fetch_assoc();
+            $stored_password = $row["password"];
+            // echo  $stored_password;
+            // echo '<br>'.$oldpass;
+            // print_r($row); die;
+            
+            // Verify current password
+            if ($stored_password==$oldpass) {
+                $update_sql = "UPDATE admin_users SET password = ? WHERE userid = ?";
+                $stmt = $conn->prepare($update_sql);
+                
+                $stmt->bind_param("ss", $newpass, $_SESSION['uid']);
+                $res=$stmt->execute();
+
+                if ($res) {
+                    $newSessionIdentifier = bin2hex(random_bytes(10));
+                    $stmt = $conn->prepare("UPDATE admin_users SET session_identifier = ? WHERE userid = ?");
+                    $stmt->bind_param('ss',$newSessionIdentifier, $_SESSION['uid']);
+                    $r=$stmt->execute();
+                   
+                    $_SESSION['success']="Password updated successfully";
+                   
+                    header('Location: admin_change_pass.php');
+                } else {
+                    $_SESSION['error_in_change']="Error in password change";
+                   
+                    header('Location: admin_change_pass.php');
+                    
+                }
+            } else {
+                $_SESSION['warning']="Old password not matched";
+               
+                header('Location:admin_change_pass.php');
+            }
+        } else {
+            echo "User not found";
+        }
+    }
+
+    function get_client_ip() {
+        $ipaddress = '';
+        if (getenv('HTTP_CLIENT_IP'))
+            $ipaddress = getenv('HTTP_CLIENT_IP');
+        else if(getenv('HTTP_X_FORWARDED_FOR'))
+            $ipaddress = getenv('HTTP_X_FORWARDED_FOR');
+        else if(getenv('HTTP_X_FORWARDED'))
+            $ipaddress = getenv('HTTP_X_FORWARDED');
+        else if(getenv('HTTP_FORWARDED_FOR'))
+            $ipaddress = getenv('HTTP_FORWARDED_FOR');
+        else if(getenv('HTTP_FORWARDED'))
+           $ipaddress = getenv('HTTP_FORWARDED');
+        else if(getenv('REMOTE_ADDR'))
+            $ipaddress = getenv('REMOTE_ADDR');
+        else
+            $ipaddress = 'UNKNOWN';
+        return $ipaddress;
+    }
+
+    function verifyCaptcha($input) {
+        /**
+         verifyCaptcha : This function verifies the validity of Captcha Images
+         
+         @return : 407 (captcha expired), 200 (captcha verified), 400 (captcha unverified), 500 (Server Error)
+         **/
+    
+          $date = time();
+        if(isset($_SESSION['captcha_set']) &&
+            isset($_SESSION['captcha_token']) &&
+                isset($_SESSION['captcha_expire'])) {
+                    //assign values
+                    $captcha_expire = $_SESSION['captcha_expire'] ;
+                    $captcha_token = $_SESSION['captcha_token'];
+                    //check if captcha has expired
+                   if($date < $_SESSION['captcha_expire']){
+                        if(md5($input.$captcha_expire) == $captcha_token){
+                            unset( $_SESSION['captcha_expire'] );
+                            unset( $_SESSION['captcha_token']);
+                            unset($_SESSION['captcha_set']);
+                            $return = array(
+                                "captcha_status" => 200,
+                                "captcha_message" => "Captcha Verified!",
+                            );
+                            return json_encode($return); 
+                        } else {
+                            $return = array(
+                                "captcha_status" => 400,
+                                "captcha_message" => "Captcha Verification Failed!",
+                             );
+                             return json_encode($return);
+                        }
+    
+                    }else{
+                        $return = array(
+                        "captcha_status" => 407,
+                        "captcha_message" => "Captcha Expired!",
+                        );
+                        return json_encode($return);
+                   }
+                }else{
+                    $return = array(
+                    "captcha_status" => 500,
+                    "captcha_message" => "Session Invalid!",
+                     );
+                    return json_encode($return);
+                }
+    }
+
+    function isPasswordStrong($password) {
+        // Minimum password length
+        $min_length = 8;
+        
+        // Check if password meets minimum length
+        if (strlen($password) < $min_length) {
+            return false;
+        }
+        
+        // Check for presence of uppercase letters
+        if (!preg_match('/[A-Z]/', $password)) {
+            return false;
+        }
+        
+        // Check for presence of lowercase letters
+        if (!preg_match('/[a-z]/', $password)) {
+            return false;
+        }
+        
+        // Check for presence of numbers
+        if (!preg_match('/[0-9]/', $password)) {
+            return false;
+        }
+        
+        // Check for presence of special characters
+        if (!preg_match('/[\'^£$%&*()}{@#~?><>,|=_+¬-]/', $password)) {
+            return false;
+        }
+        
+        // All checks passed, password is strong
+        return true;
+    }
+
+
+    if(isset($_POST['forgot_pass'])){
+       
+        if($_POST['mobile'] !=''){
+            $sql="select * from admin_users where mobile='".$_POST['mobile']."'";
+            $r=execute_query($sql);
+           
+           if(mysqli_num_rows($r) > 0){
+            $otp = rand(1000,9999);
+           $s= sendresetOTP($otp,$_POST['mobile']);
+          
+            $_SESSION['forgotpass']=$_POST['mobile'];
+            $_SESSION['dpo-otp']=$otp;
+            header('Location: forgot_otp.php');
+           }
+           else{
+            $_SESSION['err']="mobile number not found";
+
+           // echo  $_SESSION['err']; die;
+            header('Location: forget_password.php');
+           }
+
+        }
+    }
+
+    if(isset($_POST['forgot_pass_otp'])){
+        if(isset($_SESSION['forgotpass'])){
+            if($_POST['otp'] == $_SESSION['dpo-otp']){
+                $_SESSION['otp-set-dpo']='yes';
+                header('Location: password_set_dpo.php');
+            }
+            else{
+                $_SESSION['otperror']="No";
+                header('Location: forgot_otp.php');
+            }
+           
+        }
+        else{
+            header('Location: forget_password.php');
+        }
+       
+    }
+   
+
+    if(isset($_POST['update_dpo_pass'])){
+        if(isset($_SESSION['otp-set-dpo'])){
+            $sql="select id,mobile,district_id from admin_users where mobile='".$_SESSION['forgotpass']."'";
+            
+            $r=execute_query($sql);
+            
+            if(mysqli_num_rows($r) > 0){
+                $pass=md5($_POST['pass']);
+                $q="update admin_users set password='".$pass."' where mobile='".$_SESSION['forgotpass']."'";
+               
+               $res=execute_query($q);
+                if($res){
+                    $row=mysqli_fetch_assoc($r);
+                    $sql1="INSERT INTO `change_pass_bkp`(`userid`, `districtid`, `timestamp`) VALUES ('".$row['id']."','".$row['district_id']."','".date('Y-m-d H:i:s')."')";
+                    execute_query($sql1);
+                    unset($_SESSION['otp-set-dpo']);
+                    unset($_SESSION['forgotpass']);
+                    unset($_SESSION['dpo-otp']);
+                    $_SESSION['resetpass']="Password reset successfully! Please login.";
+                    header('Location: index.php');
+                }
+                else{
+                    echo"some problem occure! please try after some time";
+                }
+            }
+            else{
+                header('Location: forget_password.php');
+            }
+
+        }
+        else{
+            header('Location: forget_password.php');
+        }
+       
+    }
+?>
+

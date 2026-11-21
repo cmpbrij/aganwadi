@@ -1,0 +1,1696 @@
+<?php
+/**
+ * DSC SaaS Integration Demo Page (Single-file, production drop-in)
+ * UI: Option A (Clean Gov Console) + Browser auto local time (device)
+ *
+ * Features:
+ *  - Upload & Preview (PDF.js)
+ *  - Place visible signature box (PDF points, bottom-left origin)
+ *  - Create signing job (POST /v1/sign-jobs/upload)
+ *  - Poll status (GET /v1/sign-jobs/:jobId)
+ *  - Download signed PDF AND stamp a visible green box ALWAYS (server-side FPDI/TCPDF)
+ *
+ * Stamp Text (when status = signed):
+ *  Line 1: "DIGITALLY SIGNED BY"
+ *  Line 2: <DSC CN>
+ *  Line 3: Date/Time: <Browser Local Time> | Reason: ... | Location: ...
+ *
+ * NOTE: Local time comes from browser (JS) and is passed to download endpoint.
+ */
+
+declare(strict_types=1);
+
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+error_reporting(0);
+if (!ob_get_level()) { ob_start(); }
+if (session_status() !== PHP_SESSION_ACTIVE) { @session_start(); }
+
+// --------------------
+// CONFIG (edit these)
+// --------------------
+$DSC_SAAS_BASE = 'https://dsc.kaprirahul.com';
+$DSC_API_KEY   = 'dsc_0pbj_Z9CZzLvmru_yHy50FP8xEMBD79FE4YSL8gpgUU'; // server-side only
+$CURL_TIMEOUT  = 60;
+
+// Local PDF.js
+$PDFJS_SRC     = '/assets/pdfjs/pdf.min.js';
+$PDFJS_WORKER  = '/assets/pdfjs/pdf.worker.min.js';
+
+// Post-download stamping on signed PDF
+$STAMP_ENABLED = true;
+
+// --------------------
+// Composer (FPDI + TCPDF) for stamping
+// --------------------
+$AUTOLOAD = __DIR__ . '/vendor/autoload.php';
+if (is_file($AUTOLOAD)) { require $AUTOLOAD; }
+use setasign\Fpdi\TcpdfFpdi;
+
+// --------------------
+// Helpers
+// --------------------
+function json_out(array $data, int $code = 200): void {
+  while (ob_get_level() > 0) { @ob_end_clean(); }
+  http_response_code($code);
+  header('Content-Type: application/json; charset=utf-8');
+  header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+  header('Pragma: no-cache');
+  echo json_encode($data, JSON_UNESCAPED_SLASHES);
+  exit;
+}
+
+function curl_request(string $method, string $url, array $headers = [], $body = null, bool $returnHeaders = false, int $timeout = 60) {
+  $ch = curl_init($url);
+  curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+  curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+  curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+  curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
+  curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+  curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+  if ($returnHeaders) curl_setopt($ch, CURLOPT_HEADER, true);
+  if (!empty($headers)) curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+  if ($body !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+  $resp = curl_exec($ch);
+  $err  = curl_error($ch);
+  $info = curl_getinfo($ch);
+  curl_close($ch);
+  return [$resp, $err, $info];
+}
+
+function dsc_headers(string $apiKey): array { return ['Authorization: Bearer ' . $apiKey]; }
+function dsc_url(string $base, string $path): string { return rtrim($base, '/') . $path; }
+function rand_id(int $len = 32): string {
+  $bytes = random_bytes((int)ceil($len/2));
+  return substr(bin2hex($bytes), 0, $len);
+}
+
+function get_preview_store(): array {
+  if (!isset($_SESSION['dsc_preview_store']) || !is_array($_SESSION['dsc_preview_store'])) $_SESSION['dsc_preview_store'] = [];
+  return $_SESSION['dsc_preview_store'];
+}
+function set_preview_store(array $store): void { $_SESSION['dsc_preview_store'] = $store; }
+
+function normalize_preview_path(string $path): string {
+  $tmp = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR);
+  if (strpos($path, $tmp) !== 0) return '';
+  return $path;
+}
+
+function get_job_cache(): array {
+  if (!isset($_SESSION['dsc_job_cache']) || !is_array($_SESSION['dsc_job_cache'])) $_SESSION['dsc_job_cache'] = [];
+  return $_SESSION['dsc_job_cache'];
+}
+function set_job_cache(array $cache): void { $_SESSION['dsc_job_cache'] = $cache; }
+
+function safe_str($v): string {
+  if ($v === null) return '';
+  if (is_string($v)) return $v;
+  if (is_numeric($v)) return (string)$v;
+  return '';
+}
+
+function extract_cn_from_subject_dn(string $dn): string {
+  $dn = trim($dn);
+  if ($dn === '') return '';
+  if (preg_match('/(?:^|,)\s*CN\s*=\s*([^,]+)/i', $dn, $m)) return trim($m[1]);
+  if (preg_match('/^CN\s*=\s*([^,]+)/i', $dn, $m2)) return trim($m2[1]);
+  return '';
+}
+
+function clamp_ascii(string $s, int $maxLen = 300): string {
+  $s = preg_replace('/[^\P{C}\n\r\t]/u', '', $s); // remove control chars
+  $s = trim((string)$s);
+  if ($maxLen > 0 && strlen($s) > $maxLen) $s = substr($s, 0, $maxLen);
+  return $s;
+}
+
+/**
+ * Stamp visible box on a PDF using points (origin bottom-left in input coords).
+ * FIXED:
+ *  - Clamp box inside page
+ *  - Fit-to-box font sizing (never overflows)
+ *  - MultiCell uses LINE HEIGHT (not total height) => correct spacing
+ */
+function stamp_box_on_pdf(
+  string $inPdf,
+  string $outPdf,
+  int $page,
+  float $llx,
+  float $lly,
+  float $urx,
+  float $ury,
+  string $line1,
+  string $line2,
+  string $line3
+): array {
+  try {
+    if (!class_exists('setasign\\Fpdi\\TcpdfFpdi')) {
+      return ['ok' => false, 'error' => 'FPDI/TCPDF not installed. Run: composer require setasign/fpdi-tcpdf:^2.6'];
+    }
+    if ($page < 1) $page = 1;
+    if ($urx <= $llx || $ury <= $lly) return ['ok' => false, 'error' => 'Invalid stamp coords'];
+
+    $pdf = new \setasign\Fpdi\TcpdfFpdi('P', 'pt');
+    $pdf->SetAutoPageBreak(false);
+    $pdf->setPrintHeader(false);
+    $pdf->setPrintFooter(false);
+
+    // Keep line-height consistent between measurement + rendering
+    $ratio = 1.15;
+    $pdf->setCellHeightRatio($ratio);
+
+    $pdfSource = $inPdf;
+    $qpdfTmp = null;
+    $pdfHeader = file_get_contents($inPdf, false, null, 0, 8);
+    $pdfVersion = (float)substr($pdfHeader, 5, 3);
+    if ($pdfVersion >= 1.5) {
+      $qpdfTmp = sys_get_temp_dir() . '/dsc_qpdf_' . rand_id(12) . '.pdf';
+      $qpdfCmd = 'qpdf --stream-data=uncompress ' . escapeshellarg($inPdf) . ' ' . escapeshellarg($qpdfTmp) . ' 2>&1';
+      exec($qpdfCmd, $qpdfOut, $qpdfRet);
+      if ($qpdfRet === 0 && is_file($qpdfTmp) && filesize($qpdfTmp) > 100) {
+        $pdfSource = $qpdfTmp;
+      }
+    }
+    $pageCount = $pdf->setSourceFile($pdfSource);
+
+    for ($i = 1; $i <= $pageCount; $i++) {
+      $tplId = $pdf->importPage($i);
+      $size  = $pdf->getTemplateSize($tplId);
+      $orientation = ($size['width'] > $size['height']) ? 'L' : 'P';
+
+      $pdf->AddPage($orientation, [$size['width'], $size['height']]);
+      $pdf->useTemplate($tplId);
+
+      if ($i === $page) {
+        $pageW = (float)$size['width'];
+        $pageH = (float)$size['height'];
+
+        // Convert bottom-left coords to TCPDF top-left coords
+        $x = (float)$llx;
+        $y = (float)($pageH - (float)$ury);
+
+        $w = (float)($urx - $llx);
+        $h = (float)($ury - $lly);
+
+        if ($w < 10) $w = 10;
+        if ($h < 10) $h = 10;
+
+        // Clamp box inside page bounds
+        if ($x < 0) $x = 0;
+        if ($y < 0) $y = 0;
+        if ($x + $w > $pageW) $x = max(0.0, $pageW - $w);
+        if ($y + $h > $pageH) $y = max(0.0, $pageH - $h);
+
+        // Draw box
+        $pdf->SetLineWidth(1.2);
+        $pdf->SetDrawColor(16, 124, 65);
+        $pdf->SetFillColor(219, 246, 229);
+        $pdf->Rect($x, $y, $w, $h, 'DF');
+
+        $padding = 9.0;
+        $tx = $x + $padding;
+        $ty = $y + $padding;
+
+        $availW = max(30.0, $w - 2*$padding);
+        $availH = max(20.0, $h - 2*$padding);
+
+        $t1 = trim($line1);
+        $t2 = trim($line2);
+        $t3 = trim($line3);
+
+        // Font bounds
+        $maxHeader = 12.0; $minHeader = 8.0;
+        $maxName   = 12.0; $minName   = 8.0;
+        $maxMeta   = 10.0; $minMeta   = 7.0;
+
+        $scale = 1.0;
+
+        $calc = function(float $scale) use (
+          $pdf, $availW, $t1, $t2, $t3,
+          $maxHeader,$minHeader,$maxName,$minName,$maxMeta,$minMeta,
+          $ratio
+        ): array {
+          $headerFont = max($minHeader, min($maxHeader, $maxHeader * $scale));
+          $nameFont   = max($minName,   min($maxName,   $maxName   * $scale));
+          $metaFont   = max($minMeta,   min($maxMeta,   $maxMeta   * $scale));
+
+          $gap = 2.0;
+
+          $pdf->SetFont('helvetica', 'B', $headerFont);
+          $h1 = $pdf->getStringHeight($availW, $t1, false, true, '', $ratio);
+
+          $pdf->SetFont('helvetica', 'B', $nameFont);
+          $h2 = $pdf->getStringHeight($availW, $t2, false, true, '', $ratio);
+
+          $pdf->SetFont('helvetica', '', $metaFont);
+          $h3 = $pdf->getStringHeight($availW, $t3, false, true, '', $ratio);
+
+          $needH = $h1 + $gap + $h2 + $gap + $h3;
+
+          // Line heights for MultiCell (PER LINE)
+          $lh1 = $headerFont * $ratio;
+          $lh2 = $nameFont   * $ratio;
+          $lh3 = $metaFont   * $ratio;
+
+          return [$needH, $headerFont, $nameFont, $metaFont, $h1, $h2, $h3, $gap, $lh1, $lh2, $lh3];
+        };
+
+        for ($k = 0; $k < 30; $k++) {
+          [$needH] = $calc($scale);
+          if ($needH <= $availH) break;
+          $scale -= 0.04;
+          if ($scale < 0.55) { $scale = 0.55; break; }
+        }
+
+        [$needH, $headerFont, $nameFont, $metaFont, $h1, $h2, $h3, $gap, $lh1, $lh2, $lh3] = $calc($scale);
+
+        // Start Y (vertical center) + clamp so it NEVER exceeds bottom
+        $startY = $ty + max(0.0, ($availH - $needH) / 2.0);
+        $maxStartY = ($ty + $availH) - $needH;
+        if ($startY > $maxStartY) $startY = $maxStartY;
+        if ($startY < $ty) $startY = $ty;
+
+        $pdf->SetTextColor(0, 0, 0);
+
+        $pdf->SetFont('helvetica', 'B', $headerFont);
+        $pdf->SetXY($tx, $startY);
+        $pdf->MultiCell($availW, $lh1, $t1, 0, 'L', false, 1, $tx, $startY);
+
+        $y2 = $pdf->GetY() + $gap;
+        $pdf->SetFont('helvetica', 'B', $nameFont);
+        $pdf->SetXY($tx, $y2);
+        $pdf->MultiCell($availW, $lh2, $t2, 0, 'L', false, 1, $tx, $y2);
+
+        $y3 = $pdf->GetY() + $gap;
+        $pdf->SetFont('helvetica', '', $metaFont);
+        $pdf->SetXY($tx, $y3);
+        $pdf->MultiCell($availW, $lh3, $t3, 0, 'L', false, 1, $tx, $y3);
+      }
+    }
+
+    $pdf->Output($outPdf, 'F');
+    if ($qpdfTmp && is_file($qpdfTmp)) @unlink($qpdfTmp);
+
+    if (!is_file($outPdf) || filesize($outPdf) < 100) {
+      return ['ok' => false, 'error' => 'Stamped PDF not created'];
+    }
+    return ['ok' => true, 'out' => $outPdf];
+
+  } catch (\Throwable $e) {
+    return ['ok' => false, 'error' => 'Stamp failed: ' . $e->getMessage()];
+  }
+}
+
+// --------------------
+// AJAX API (same file)
+// --------------------
+$action = $_POST['action'] ?? $_GET['action'] ?? null;
+
+if ($action) {
+  if ($action === 'upload_preview') {
+    if (empty($_FILES['pdf']['tmp_name'])) json_out(['ok' => false, 'error' => 'file_required'], 400);
+
+    $tmp  = $_FILES['pdf']['tmp_name'];
+    $name = $_FILES['pdf']['name'] ?? 'document.pdf';
+
+    $bytes = @file_get_contents($tmp);
+    if ($bytes === false || strlen($bytes) < 10) json_out(['ok' => false, 'error' => 'file_read_failed'], 400);
+    if (substr($bytes, 0, 5) !== '%PDF-') json_out(['ok' => false, 'error' => 'not_a_pdf'], 400);
+
+    $id = rand_id(24);
+    $dst = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . "dsc_preview_{$id}.pdf";
+    if (@move_uploaded_file($tmp, $dst) !== true) {
+      if (@file_put_contents($dst, $bytes) === false) json_out(['ok' => false, 'error' => 'save_failed'], 500);
+    }
+
+    $store = get_preview_store();
+    $store[$id] = ['path' => $dst, 'name' => $name, 'ts' => time()];
+
+    // prune store
+    $now = time();
+    foreach ($store as $k => $v) {
+      $ts = (int)($v['ts'] ?? 0);
+      if ($ts && ($now - $ts) > 21600) {
+        $p = normalize_preview_path((string)($v['path'] ?? ''));
+        if ($p && is_file($p)) @unlink($p);
+        unset($store[$k]);
+      }
+    }
+    set_preview_store($store);
+
+    json_out([
+      'ok' => true,
+      'preview_id' => $id,
+      'file_name' => $name,
+      'size_bytes' => strlen($bytes),
+      'preview_url' => (string)($_SERVER['PHP_SELF'] ?? 'index.php') . '?action=preview_pdf&id=' . rawurlencode($id),
+    ]);
+  }
+
+  if ($action === 'preview_pdf') {
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+
+    $id = (string)($_GET['id'] ?? '');
+    if (!$id) { http_response_code(400); header('Content-Type:text/plain; charset=utf-8'); echo "missing_id"; exit; }
+
+    $store = get_preview_store();
+    if (!isset($store[$id])) { http_response_code(404); header('Content-Type:text/plain; charset=utf-8'); echo "not_found"; exit; }
+
+    $path = normalize_preview_path((string)($store[$id]['path'] ?? ''));
+    if (!$path || !is_file($path)) { http_response_code(404); header('Content-Type:text/plain; charset=utf-8'); echo "missing_file"; exit; }
+
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Content-Type: application/pdf');
+    header('Content-Length: ' . (string)filesize($path));
+    header('Content-Disposition: inline; filename="preview.pdf"');
+    readfile($path);
+    exit;
+  }
+
+  if ($DSC_API_KEY === 'REPLACE_WITH_CLIENT_API_KEY' || strlen($DSC_API_KEY) < 12) {
+    json_out(['ok' => false, 'error' => 'server_not_configured_api_key'], 500);
+  }
+
+  if ($action === 'health') {
+    $url = dsc_url($DSC_SAAS_BASE, '/v1/health');
+    [$resp, $err, $info] = curl_request('GET', $url, [], null, false, $GLOBALS['CURL_TIMEOUT']);
+    if ($err) json_out(['ok' => false, 'error' => 'curl_error', 'details' => $err], 500);
+    $json = json_decode((string)$resp, true);
+    if (!is_array($json)) json_out(['ok' => false, 'error' => 'invalid_json', 'raw' => $resp], 500);
+    json_out(['ok' => true, 'upstream' => $json, 'http_code' => $info['http_code'] ?? null]);
+  }
+
+  if ($action === 'create_job_upload') {
+    $previewId = trim((string)($_POST['preview_id'] ?? ''));
+    $tmp = '';
+    $name = 'document.pdf';
+
+    if ($previewId !== '') {
+      $store = get_preview_store();
+      if (!isset($store[$previewId])) json_out(['ok' => false, 'error' => 'invalid_preview_id'], 400);
+      $path = normalize_preview_path((string)($store[$previewId]['path'] ?? ''));
+      if (!$path || !is_file($path)) json_out(['ok' => false, 'error' => 'preview_file_missing'], 400);
+      $tmp = $path;
+      $name = (string)($store[$previewId]['name'] ?? 'document.pdf');
+    } else {
+      if (empty($_FILES['pdf']['tmp_name'])) json_out(['ok' => false, 'error' => 'file_required'], 400);
+      $tmp  = $_FILES['pdf']['tmp_name'];
+      $name = $_FILES['pdf']['name'] ?? 'document.pdf';
+      $bytes = file_get_contents($tmp);
+      if ($bytes === false || strlen($bytes) < 10) json_out(['ok' => false, 'error' => 'file_read_failed'], 400);
+      if (substr($bytes, 0, 5) !== '%PDF-') json_out(['ok' => false, 'error' => 'not_a_pdf'], 400);
+    }
+
+    $vsPage = (int)($_POST['vs_page'] ?? 1);
+    $vsX    = (int)($_POST['vs_x'] ?? 50);
+    $vsY    = (int)($_POST['vs_y'] ?? 50);
+    $vsW    = (int)($_POST['vs_w'] ?? 200);
+    $vsH    = (int)($_POST['vs_h'] ?? 60);
+
+    $llx = max(0, $vsX);
+    $lly = max(0, $vsY);
+    $urx = max(0, $vsX + max(1, $vsW));
+    $ury = max(0, $vsY + max(1, $vsH));
+
+    $signature_reason   = trim((string)($_POST['signature_reason'] ?? 'Approved'));
+    $signature_location = trim((string)($_POST['signature_location'] ?? ''));
+
+    $signing = [
+      'signature_reason'   => $signature_reason,
+      'signature_location' => $signature_location,
+      'visible_signature'  => [
+        'visible' => true,
+        'page'    => max(1, $vsPage),
+        'llx'     => $llx,
+        'lly'     => $lly,
+        'urx'     => $urx,
+        'ury'     => $ury,
+      ],
+    ];
+
+    $requester = [
+      'portal_user_id'   => trim((string)($_POST['portal_user_id'] ?? 'OFFICER_1')),
+      'portal_user_name' => trim((string)($_POST['portal_user_name'] ?? 'Officer')),
+      'portal_dept'      => trim((string)($_POST['portal_dept'] ?? '')),
+    ];
+
+    $metadata = ['portal_ref_no' => trim((string)($_POST['portal_ref_no'] ?? ''))];
+
+    $preferredNodeId = trim((string)($_POST['preferred_node_id'] ?? ''));
+
+    $postFields = [
+      'file'      => new CURLFile($tmp, 'application/pdf', $name),
+      'signing'   => json_encode($signing, JSON_UNESCAPED_SLASHES),
+      'requester' => json_encode($requester, JSON_UNESCAPED_SLASHES),
+      'metadata'  => json_encode($metadata, JSON_UNESCAPED_SLASHES),
+    ];
+    if ($preferredNodeId !== '') {
+      $postFields['preferred_node_id'] = $preferredNodeId;
+    }
+
+    $url = dsc_url($DSC_SAAS_BASE, '/v1/sign-jobs/upload');
+    $headers = dsc_headers($DSC_API_KEY);
+
+    [$resp, $err, $info] = curl_request('POST', $url, $headers, $postFields, false, $GLOBALS['CURL_TIMEOUT']);
+    if ($err) json_out(['ok' => false, 'error' => 'curl_error', 'details' => $err], 500);
+
+    $json = json_decode((string)$resp, true);
+    if (!is_array($json)) json_out(['ok' => false, 'error' => 'invalid_json', 'raw' => $resp], 500);
+
+    // Cache coords + reason/location for stamping
+    $jobId = safe_str($json['job_id'] ?? '');
+    if (strlen($jobId) === 36) {
+      $cache = get_job_cache();
+      $cache[$jobId] = array_merge($cache[$jobId] ?? [], [
+        'vs' => [
+          'page' => max(1, $vsPage),
+          'llx'  => $llx,
+          'lly'  => $lly,
+          'urx'  => $urx,
+          'ury'  => $ury,
+        ],
+        'reason'   => $signature_reason,
+        'location' => $signature_location,
+        'ts_created' => time(),
+      ]);
+      set_job_cache($cache);
+    }
+
+    json_out(['ok' => true, 'http_code' => $info['http_code'] ?? null, 'upstream' => $json]);
+  }
+
+  if ($action === 'job_status') {
+    $jobId = trim((string)($_POST['job_id'] ?? ''));
+    if (strlen($jobId) !== 36) json_out(['ok' => false, 'error' => 'invalid_job_id'], 400);
+
+    $url = dsc_url($DSC_SAAS_BASE, '/v1/sign-jobs/' . rawurlencode($jobId));
+    $headers = array_merge(dsc_headers($DSC_API_KEY), ['Accept: application/json']);
+
+    [$resp, $err, $info] = curl_request('GET', $url, $headers, null, false, $GLOBALS['CURL_TIMEOUT']);
+    if ($err) json_out(['ok' => false, 'error' => 'curl_error', 'details' => $err], 500);
+
+    $json = json_decode((string)$resp, true);
+    if (!is_array($json)) json_out(['ok' => false, 'error' => 'invalid_json', 'raw' => $resp], 500);
+
+    // Cache signer name + signed time when signed
+    $job = $json['job'] ?? $json;
+    $status = strtolower(safe_str($job['status'] ?? ''));
+
+    if ($status === 'signed') {
+      $subjectDn = safe_str($job['signer_cert']['subject_dn'] ?? '');
+      $cn = extract_cn_from_subject_dn($subjectDn);
+
+      $signedAt =
+          safe_str($job['signed_at'] ?? '')
+       ?: safe_str($job['signedAt'] ?? '')
+       ?: safe_str($job['completed_at'] ?? '')
+       ?: safe_str($job['completedAt'] ?? '')
+       ?: safe_str($job['updated_at'] ?? '');
+
+      $cache = get_job_cache();
+      $cache[$jobId] = array_merge($cache[$jobId] ?? [], [
+        'signer' => ($cn !== '' ? $cn : $subjectDn),
+        'signed_at' => $signedAt,
+        'ts_signed_cached' => time(),
+      ]);
+      set_job_cache($cache);
+    }
+
+    json_out(['ok' => true, 'http_code' => $info['http_code'] ?? null, 'upstream' => $json]);
+  }
+
+  if ($action === 'download_pdf') {
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+
+    $jobId = trim((string)($_GET['job_id'] ?? ''));
+    if (strlen($jobId) !== 36) {
+      http_response_code(400);
+      header('Content-Type: application/json; charset=utf-8');
+      echo json_encode(['ok'=>false,'error'=>'invalid_job_id'], JSON_UNESCAPED_SLASHES);
+      exit;
+    }
+
+    // Browser local time info (display-only)
+    $browserLocal = clamp_ascii((string)($_GET['local_time'] ?? ''), 120);
+    $browserTz    = clamp_ascii((string)($_GET['tz'] ?? ''), 80);
+
+    // 1) ALWAYS fetch job details first
+    $jobUrl = dsc_url($DSC_SAAS_BASE, '/v1/sign-jobs/' . rawurlencode($jobId));
+    $headers = array_merge(dsc_headers($DSC_API_KEY), ['Accept: application/json']);
+    [$jobResp, $jobErr, $jobInfo] = curl_request('GET', $jobUrl, $headers, null, false, $GLOBALS['CURL_TIMEOUT']);
+
+    $jobJson = null;
+    $job = null;
+
+    if (!$jobErr) {
+      $jobJson = json_decode((string)$jobResp, true);
+      if (is_array($jobJson)) $job = $jobJson['job'] ?? $jobJson;
+    }
+
+    $status = strtolower(safe_str($job['status'] ?? ''));
+    // We only show DSC + date/time when SIGNED (requirement)
+    $isSigned = ($status === 'signed');
+
+    // Extract signer CN from job details
+    $subjectDn = safe_str($job['signer_cert']['subject_dn'] ?? '');
+    $cn = extract_cn_from_subject_dn($subjectDn);
+    $signerCn = ($cn !== '' ? $cn : '');
+
+    // Reason/Location from job.signing
+    $reason = safe_str($job['signing']['signature_reason'] ?? '');
+    $location = safe_str($job['signing']['signature_location'] ?? '');
+
+    // 2) Fetch SIGNED PDF bytes
+    $pdfUrl = dsc_url($DSC_SAAS_BASE, '/v1/sign-jobs/' . rawurlencode($jobId) . '/result/pdf');
+    [$resp, $err, $info] = curl_request('GET', $pdfUrl, dsc_headers($DSC_API_KEY), null, false, $GLOBALS['CURL_TIMEOUT']);
+
+    if ($err) {
+      http_response_code(500);
+      header('Content-Type: application/json; charset=utf-8');
+      echo json_encode(['ok'=>false,'error'=>'curl_error','details'=>$err], JSON_UNESCAPED_SLASHES);
+      exit;
+    }
+
+    $code = (int)($info['http_code'] ?? 0);
+    if ($code !== 200 || !is_string($resp) || strlen($resp) < 100) {
+      http_response_code($code ?: 502);
+      header('Content-Type: application/json; charset=utf-8');
+      echo json_encode(['ok'=>false,'error'=>'upstream_non_200','http_code'=>$code,'body'=>mb_substr((string)$resp,0,2000)], JSON_UNESCAPED_SLASHES);
+      exit;
+    }
+
+    $in = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'dsc_signed_in_' . $jobId . '_' . rand_id(8) . '.pdf';
+    @file_put_contents($in, $resp);
+    $finalPath = $in;
+
+    // 3) Determine stamp coords: cache first, else upstream visible_signature
+    $cache = get_job_cache();
+    $c = $cache[$jobId] ?? [];
+    $vs = (isset($c['vs']) && is_array($c['vs'])) ? $c['vs'] : null;
+
+    if (!$vs) {
+      $rawVs = $job['signing']['visible_signature'] ?? null;
+      if (is_string($rawVs) && $rawVs !== '') {
+        $decoded = json_decode($rawVs, true);
+        if (is_array($decoded) && !empty($decoded['visible'])) {
+          $vs = [
+            'page' => (int)($decoded['page'] ?? 1),
+            'llx'  => (float)($decoded['llx'] ?? 0),
+            'lly'  => (float)($decoded['lly'] ?? 0),
+            'urx'  => (float)($decoded['urx'] ?? 0),
+            'ury'  => (float)($decoded['ury'] ?? 0),
+          ];
+        }
+      }
+    }
+
+    // 4) Stamp on signed PDF
+    if (!empty($GLOBALS['STAMP_ENABLED']) && $vs && is_file($in) && filesize($in) > 100) {
+      $page = (int)($vs['page'] ?? 1);
+      $llx = (float)($vs['llx'] ?? 0);
+      $lly = (float)($vs['lly'] ?? 0);
+      $urx = (float)($vs['urx'] ?? 0);
+      $ury = (float)($vs['ury'] ?? 0);
+
+      if ($urx > $llx && $ury > $lly) {
+        // Required: show DSC name + date/time only when SIGNED
+        $line1 = $isSigned ? 'DIGITALLY SIGNED BY' : 'DIGITALLY SIGNED';
+        $line2 = $isSigned ? ($signerCn !== '' ? $signerCn : '—') : '—';
+
+        $meta = [];
+        if ($isSigned) {
+          // Browser local time (always preferred)
+          $lt = $browserLocal !== '' ? $browserLocal : '';
+          $tz = $browserTz !== '' ? $browserTz : '';
+          if ($lt !== '') {
+            // $meta[] = 'Date/Time: ' . $lt . ($tz !== '' ? ' (' . $tz . ')' : '');
+            $meta[] = 'Date/Time: ' . $lt;
+            }
+        }
+        if ($reason !== '') $meta[] = 'Reason: ' . $reason;
+        if ($location !== '') $meta[] = 'Location: ' . $location;
+
+        $line3 = $meta ? implode(' | ', $meta) : '—';
+
+        $out = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'dsc_signed_stamped_' . $jobId . '_' . rand_id(8) . '.pdf';
+
+        $res = stamp_box_on_pdf($in, $out, $page, $llx, $lly, $urx, $ury, $line1, $line2, $line3);
+        file_put_contents('/tmp/stamp_debug.log', date('Y-m-d H:i:s') . ' ' . json_encode($res) . "\n", FILE_APPEND);
+
+        if (($res['ok'] ?? false) && is_file($out) && filesize($out) > 100) {
+          $finalPath = $out;
+        }
+      }
+    }
+
+    header('Content-Type: application/pdf');
+    header('Content-Disposition: attachment; filename="signed_' . $jobId . '.pdf"');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Content-Length: ' . (string)filesize($finalPath));
+    readfile($finalPath);
+
+    @unlink($in);
+    if ($finalPath !== $in) @unlink($finalPath);
+    exit;
+  }
+
+  if ($action === 'audit') {
+    $qs = [];
+    foreach (['job_id','event_type','from','to','limit','offset'] as $k) {
+      if (!empty($_POST[$k])) $qs[$k] = (string)$_POST[$k];
+    }
+    $url = dsc_url($DSC_SAAS_BASE, '/v1/audit');
+    if (!empty($qs)) $url .= '?' . http_build_query($qs);
+
+    $headers = array_merge(dsc_headers($DSC_API_KEY), ['Accept: application/json']);
+    [$resp, $err, $info] = curl_request('GET', $url, $headers, null, false, $GLOBALS['CURL_TIMEOUT']);
+    if ($err) json_out(['ok' => false, 'error' => 'curl_error', 'details' => $err], 500);
+
+    $json = json_decode((string)$resp, true);
+    if (!is_array($json)) json_out(['ok' => false, 'error' => 'invalid_json', 'raw' => $resp], 500);
+
+    json_out(['ok' => true, 'http_code' => $info['http_code'] ?? null, 'upstream' => $json]);
+  }
+
+  if ($action === 'event_types') {
+    $url = dsc_url($DSC_SAAS_BASE, '/v1/audit/event-types');
+    $headers = array_merge(dsc_headers($DSC_API_KEY), ['Accept: application/json']);
+    [$resp, $err, $info] = curl_request('GET', $url, $headers, null, false, $GLOBALS['CURL_TIMEOUT']);
+    if ($err) json_out(['ok' => false, 'error' => 'curl_error', 'details' => $err], 500);
+
+    $json = json_decode((string)$resp, true);
+    if (!is_array($json)) json_out(['ok' => false, 'error' => 'invalid_json', 'raw' => $resp], 500);
+
+    json_out(['ok' => true, 'http_code' => $info['http_code'] ?? null, 'upstream' => $json]);
+  }
+
+  json_out(['ok' => false, 'error' => 'unknown_action'], 400);
+}
+?>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>DSC SaaS – PDF Signing Console</title>
+  <script src="<?php echo htmlspecialchars($PDFJS_SRC, ENT_QUOTES); ?>"></script>
+
+  <style>
+    :root{
+      --bg:#f4f6f9;
+      --paper:#ffffff;
+      --ink:#0f172a;
+      --muted:#475569;
+      --line:#d8dee8;
+      --line2:#e8edf5;
+      --blue:#1d4ed8;
+      --green:#0f7a3a;
+      --green2:#e6f6ec;
+      --amber:#b45309;
+      --red:#b42318;
+
+      --r:14px;
+      --shadow: 0 10px 24px rgba(15,23,42,.08);
+      --shadow2: 0 2px 10px rgba(15,23,42,.06);
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+    }
+
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      background: radial-gradient(1200px 700px at 18% 0%, rgba(29,78,216,.08), transparent 55%),
+                  radial-gradient(900px 600px at 85% 15%, rgba(15,122,58,.07), transparent 55%),
+                  var(--bg);
+      color:var(--ink);
+      font-family: var(--sans);
+      padding: 18px;
+    }
+
+    .wrap{ max-width: 1480px; margin: 0 auto; }
+
+    /* Header */
+    .topbar{
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--r);
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      display:flex;
+      gap:14px;
+      align-items:flex-start;
+      justify-content: space-between;
+    }
+    .brand{ min-width: 280px; }
+    .brand .title{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      font-weight: 900;
+      letter-spacing: .2px;
+      font-size: 16px;
+      margin:0;
+    }
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f8fafc;
+      font-size: 12px;
+      font-weight: 800;
+      color: #334155;
+      white-space:nowrap;
+    }
+    .sub{
+      margin-top:6px;
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.35;
+      max-width: 920px;
+    }
+
+    .nav{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+      align-items:center;
+    }
+
+    .btn{
+      border:1px solid var(--line);
+      background: #fff;
+      color: #0f172a;
+      padding: 9px 12px;
+      border-radius: 12px;
+      cursor:pointer;
+      font-weight: 800;
+      font-size: 12px;
+      transition: background .12s ease, transform .08s ease, border-color .12s ease, box-shadow .12s ease, opacity .12s ease;
+      user-select:none;
+      white-space:nowrap;
+      box-shadow: var(--shadow2);
+    }
+    .btn:hover{ background:#f8fafc; border-color:#cfd7e6; }
+    .btn:active{ transform: translateY(1px); }
+    .btnPrimary{
+      background: linear-gradient(180deg, rgba(29,78,216,1), rgba(29,78,216,.92));
+      border-color: rgba(29,78,216,.25);
+      color:#fff;
+      box-shadow: 0 10px 18px rgba(29,78,216,.18);
+    }
+    .btnPrimary:hover{ background: linear-gradient(180deg, rgba(29,78,216,1), rgba(29,78,216,.86)); }
+    .btnGreen{
+      background: linear-gradient(180deg, rgba(15,122,58,1), rgba(15,122,58,.92));
+      border-color: rgba(15,122,58,.22);
+      color:#fff;
+      box-shadow: 0 10px 18px rgba(15,122,58,.16);
+    }
+    .btnGreen:hover{ background: linear-gradient(180deg, rgba(15,122,58,1), rgba(15,122,58,.86)); }
+    .btnGhost{
+      background:#fff;
+      box-shadow:none;
+    }
+    .btn:disabled{ opacity:.55; cursor:not-allowed; box-shadow:none; }
+
+    /* Layout */
+    .gridTop{
+      display:grid;
+      grid-template-columns: 8fr 4fr;
+      gap:14px;
+      margin-top: 14px;
+    }
+    .gridBottom{
+      display:grid;
+      grid-template-columns: 1.2fr 1fr 1fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    @media (max-width: 1200px){
+      .gridTop{ grid-template-columns: 1fr; }
+      .gridBottom{ grid-template-columns: 1fr; }
+      .nav{ justify-content:flex-start; }
+    }
+
+    /* Cards */
+    .card{
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: var(--r);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .cardHeader{
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line2);
+      background: #fbfcfe;
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .cardHeader h3{
+      margin:0;
+      font-size: 13px;
+      font-weight: 900;
+      display:flex;
+      align-items:center;
+      gap: 8px;
+      color:#0f172a;
+    }
+    .chip{
+      font-size: 11.5px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background:#fff;
+      color:#334155;
+      white-space:nowrap;
+      font-weight: 800;
+    }
+    .cardBody{ padding: 12px 14px 14px; }
+
+    /* Form */
+    label{ display:block; font-size: 12px; font-weight: 800; color:#334155; margin: 10px 0 6px; }
+    .help{ font-size: 12px; color: var(--muted); line-height:1.35; margin-top:6px; }
+    input, textarea{
+      width:100%;
+      padding: 10px 11px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      outline:none;
+      font-size: 13px;
+      box-shadow: inset 0 1px 0 rgba(15,23,42,.03);
+    }
+    input:focus, textarea:focus{ border-color: rgba(29,78,216,.35); box-shadow: 0 0 0 3px rgba(29,78,216,.10); }
+
+    .row{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
+    .row3{ display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; }
+    @media (max-width: 1200px){ .row,.row3{ grid-template-columns: 1fr; } }
+
+    .divider{ height:1px; background: var(--line2); margin: 12px 0; }
+
+    /* Preview Stage */
+    .stage{
+      position:relative;
+      width:100%;
+      height: calc(100vh - 260px);
+      min-height: 520px;
+      border-radius: var(--r);
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      overflow:auto;
+      padding: 12px;
+      margin-top: 10px;
+    }
+    canvas#pdfCanvas{
+      display:block; margin:0 auto;
+      background:#fff;
+      border-radius: 12px;
+      border:1px solid var(--line2);
+      box-shadow: var(--shadow2);
+    }
+
+    .sigBox{
+      position:absolute;
+      border:2px solid rgba(15,122,58,.95);
+      background: rgba(15,122,58,.12);
+      box-shadow: 0 0 0 4px rgba(15,122,58,.10);
+      pointer-events:none;
+      border-radius: 10px;
+      overflow:hidden;
+      display:none;
+    }
+    .sigLabel{
+      position:absolute; left:10px; bottom:10px;
+      font-size: 12px;
+      line-height: 1.25;
+      color: #0f172a;
+      font-weight: 900;
+      background: rgba(255,255,255,.86);
+      border: 1px solid rgba(15,23,42,.10);
+      padding: 6px 8px;
+      border-radius: 10px;
+      white-space: pre-line;
+      max-width: calc(100% - 20px);
+    }
+
+    .toolbar{
+      display:flex;
+      justify-content: space-between;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .toolbarLeft{
+      display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+    }
+    .toolbarRight{
+      display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+    }
+    .mini{
+      font-size: 12px;
+      color:#334155;
+      font-weight: 800;
+      padding: 6px 10px;
+      border:1px dashed var(--line);
+      border-radius: 999px;
+      background:#fff;
+    }
+
+    /* Status Banner */
+    .statusBanner{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: var(--shadow2);
+      padding: 12px;
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 10px;
+    }
+    .statusLeft{
+      display:flex; gap:10px; align-items:center;
+    }
+    .dot{
+      width: 12px; height: 12px; border-radius: 999px;
+      background: #94a3b8;
+      box-shadow: 0 0 0 5px rgba(148,163,184,.15);
+    }
+    .dot.ok{ background: #16a34a; box-shadow: 0 0 0 5px rgba(22,163,74,.18); }
+    .dot.warn{ background: #f59e0b; box-shadow: 0 0 0 5px rgba(245,158,11,.18); }
+    .dot.bad{ background: #ef4444; box-shadow: 0 0 0 5px rgba(239,68,68,.18); }
+
+    .statusText .k{ font-size: 12px; color: var(--muted); font-weight: 800; }
+    .statusText .v{ font-size: 16px; font-weight: 900; margin-top: 2px; }
+
+    .kpi{
+      display:grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap:10px;
+      margin-top: 10px;
+    }
+    .kpi .box{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background:#fff;
+      box-shadow: var(--shadow2);
+      padding: 10px;
+      min-height: 70px;
+    }
+    .kpi .t{ font-size: 12px; color: var(--muted); font-weight: 800; }
+    .kpi .v{
+      font-size: 13.5px;
+      font-weight: 900;
+      margin-top: 6px;
+      word-break: break-word;
+    }
+    @media (max-width: 1200px){
+      .kpi{ grid-template-columns: 1fr 1fr; }
+    }
+
+    /* JSON viewer */
+    .preWrap{
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r);
+      background: #0b1220;
+      color: #d1fae5;
+      padding: 10px;
+      max-height: 340px;
+      overflow:auto;
+      font-size: 11.5px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--mono);
+    }
+
+    .jsonTools{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+
+    .mono{ font-family: var(--mono); }
+
+    .footNote{
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .sectionHint{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+      margin-top: 8px;
+    }
+    .hintPill{
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      padding: 6px 10px;
+      font-size: 12px;
+      color: #334155;
+      font-weight: 800;
+    }
+
+    .danger{
+      color: #7f1d1d;
+      background: #fff1f2;
+      border: 1px solid #fecdd3;
+      padding: 10px 12px;
+      border-radius: 14px;
+      font-size: 12px;
+      font-weight: 800;
+      margin-top: 10px;
+      display:none;
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand">
+      <div class="title">
+        DSC – PDF Signing Console
+      </div>
+      <div class="sub">
+        Workflow: <b>Upload & Preview</b> → <b>Place signature box</b> → <b>Create Job</b> → <b>Status</b> → <b>Download Signed PDF</b>.<br/>
+        Download always stamps the visible green box on the final PDF. Signer name is extracted from <span class="mono">signer_cert.subject_dn (CN)</span>.
+      </div>
+    </div>
+
+    <div class="nav">
+      <button class="btn btnGhost" onclick="scrollToId('cardPreview')">Preview</button>
+      <button class="btn btnGhost" onclick="scrollToId('cardCreate')">Create Job</button>
+      <button class="btn btnGhost" onclick="scrollToId('cardStatus')">Status</button>
+      <button class="btn btnGhost" onclick="scrollToId('cardAudit')">Audit</button>
+      <button class="btn btnGhost" onclick="scrollToId('cardHealth')">Health</button>
+    </div>
+  </div>
+
+  <div class="gridTop">
+    <!-- Preview -->
+    <div class="card" id="cardPreview">
+      <div class="cardHeader">
+        <h3>📄 PDF Preview & Signature Placement</h3>
+        <span class="chip">Coordinates: PDF points • Origin: bottom-left</span>
+      </div>
+      <div class="cardBody">
+        <div class="toolbar">
+          <div class="toolbarLeft">
+            <span id="pdfInfo" class="mini">No PDF uploaded</span>
+            <span class="mini">Tip: Click/Drag or single-click to place preset box</span>
+          </div>
+          <div class="toolbarRight">
+            <button class="btn" type="button" onclick="prevPage()">◀ Prev</button>
+            <button class="btn" type="button" onclick="nextPage()">Next ▶</button>
+            <button class="btn" type="button" onclick="zoomOut()">−</button>
+            <button class="btn" type="button" onclick="zoomIn()">+</button>
+            <button class="btn" type="button" onclick="clearBox()">Clear</button>
+          </div>
+        </div>
+
+        <div class="sectionHint">
+          <span class="hintPill">Quick size</span>
+          <button class="btn" type="button" onclick="setBoxPreset('S')">Small</button>
+          <button class="btn" type="button" onclick="setBoxPreset('M')">Medium</button>
+          <button class="btn" type="button" onclick="setBoxPreset('L')">Large</button>
+        </div>
+
+        <div id="stage" class="stage">
+          <canvas id="pdfCanvas"></canvas>
+          <div id="sigBox" class="sigBox">
+            <div id="sigLabel" class="sigLabel">Digitally signed</div>
+          </div>
+        </div>
+
+        <div class="footNote">X/Y/W/H are in PDF points. Origin is bottom-left (as required by visible_signature).</div>
+      </div>
+    </div>
+
+    <!-- Create -->
+    <div class="card" id="cardCreate">
+      <div class="cardHeader">
+        <h3>🧾 Create Sign Job</h3>
+        <span class="chip">POST /v1/sign-jobs/upload</span>
+      </div>
+      <div class="cardBody">
+
+        <label>Step 1: Upload PDF for Preview</label>
+        <div class="row" style="align-items:end;">
+          <div>
+            <input id="pdfFile" type="file" accept="application/pdf" onchange="onFileChosen(this.files && this.files[0] ? this.files[0] : null)">
+            <div class="help">Choose a PDF file. Then click <b>Upload & Preview</b>.</div>
+          </div>
+          <div>
+            <button id="btnUploadPreview" class="btn btnPrimary" type="button" onclick="uploadAndPreview()" disabled>Upload & Preview</button>
+            <div class="help">This loads the PDF into the left preview panel.</div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <label>Step 2: Signing Details</label>
+        <form id="formCreate" onsubmit="return createJob(event)">
+          <input type="hidden" id="preview_id" name="preview_id" value="">
+
+          <div class="row">
+            <div>
+              <label>Signature Reason</label>
+              <input type="text" name="signature_reason" value="Approved">
+            </div>
+            <div>
+              <label>Signature Location</label>
+              <input type="text" name="signature_location" value="Lucknow">
+            </div>
+          </div>
+
+          <label>Visible Signature Placement (auto-filled from your green box)</label>
+          <div class="row3">
+            <div><label>Page</label><input id="vs_page" type="number" name="vs_page" value="1" min="1"></div>
+            <div><label>X (pt)</label><input id="vs_x" type="number" name="vs_x" value="50" min="0"></div>
+            <div><label>Y (pt)</label><input id="vs_y" type="number" name="vs_y" value="50" min="0"></div>
+          </div>
+          <div class="row">
+            <div><label>Width (pt)</label><input id="vs_w" type="number" name="vs_w" value="200" min="1"></div>
+            <div><label>Height (pt)</label><input id="vs_h" type="number" name="vs_h" value="60" min="1"></div>
+          </div>
+
+          <label>Requester Details</label>
+          <div class="row">
+            <div><label>portal_user_id</label><input type="text" name="portal_user_id" value="OFFICER_1"></div>
+            <div><label>portal_user_name (portal)</label><input type="text" name="portal_user_name" value="Officer"></div>
+          </div>
+
+          <div class="divider"></div>
+
+          <label>Step 3: Create Job</label>
+          <div class="row" style="align-items:end;">
+            <div>
+              <button id="btnCreateJob" class="btn btnGreen" type="submit" disabled>Create Job</button>
+              <div class="help">Creates a signing job and starts polling automatically.</div>
+            </div>
+            <div>
+              <label>Created Job ID</label>
+              <input id="jobId" class="mono" type="text" placeholder="job_id will appear here">
+            </div>
+          </div>
+        </form>
+
+        <div class="divider"></div>
+
+        <div class="jsonTools">
+          <span class="chip">Create Job Output</span>
+          <button class="btn" type="button" onclick="copyPre('outCreate')">Copy JSON</button>
+        </div>
+        <pre id="outCreate" class="preWrap">{}</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="gridBottom">
+    <!-- Status -->
+    <div class="card" id="cardStatus">
+      <div class="cardHeader">
+        <h3>📡 Status & Download</h3>
+        <span class="chip">GET /v1/sign-jobs/:jobId</span>
+      </div>
+      <div class="cardBody">
+        <div class="row" style="align-items:end;">
+          <div>
+            <label>Controls</label>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn btnPrimary" onclick="checkStatus()">Check Status</button>
+              <button class="btn" onclick="startPolling()">Start Poll (3s)</button>
+              <button class="btn" onclick="stopPolling()">Stop</button>
+            </div>
+            <div class="help">Local time shown below is from your device/browser.</div>
+          </div>
+          <div>
+            <label>Local Time (Your Device)</label>
+            <input id="localClock" type="text" readonly>
+          </div>
+        </div>
+
+        <div id="errBox" class="danger"></div>
+
+        <div class="statusBanner">
+          <div class="statusLeft">
+            <div id="statusDot" class="dot"></div>
+            <div class="statusText">
+              <div class="k">Current Job Status</div>
+              <div id="statusValue" class="v">—</div>
+            </div>
+          </div>
+          <button id="btnDownload" class="btn btnGreen" onclick="downloadPdf()" disabled>⬇️ Download Signed PDF (Stamped)</button>
+        </div>
+
+        <div class="kpi">
+          <div class="box"><div class="t">Attempts</div><div id="kpiAttempts" class="v">—</div></div>
+          <div class="box"><div class="t">Assigned Node</div><div id="kpiNode" class="v">—</div></div>
+          <div class="box"><div class="t">Signer (DSC)</div><div id="kpiSigner" class="v">—</div></div>
+          <div class="box"><div class="t">Signed At (Local)</div><div id="kpiSignedAtLocal" class="v">—</div></div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="jsonTools">
+          <span class="chip">Status Output</span>
+          <button class="btn" type="button" onclick="copyPre('outStatus')">Copy JSON</button>
+        </div>
+        <pre id="outStatus" class="preWrap">{}</pre>
+      </div>
+    </div>
+
+    <!-- Audit -->
+    <div class="card" id="cardAudit">
+      <div class="cardHeader">
+        <h3>🧾 Audit</h3>
+        <span class="chip">GET /v1/audit</span>
+      </div>
+      <div class="cardBody">
+        <div class="row" style="align-items:end;">
+          <div>
+            <button class="btn btnPrimary" onclick="loadAudit()">Load Audit</button>
+            <div class="help">Shows latest 20 audit events (optionally filtered by job_id).</div>
+          </div>
+          <div class="jsonTools" style="justify-content:flex-end;">
+            <button class="btn" type="button" onclick="copyPre('outAudit')">Copy JSON</button>
+          </div>
+        </div>
+        <pre id="outAudit" class="preWrap">{}</pre>
+      </div>
+    </div>
+
+    <!-- Health -->
+    <div class="card" id="cardHealth">
+      <div class="cardHeader">
+        <h3>🩺 Health</h3>
+        <span class="chip">GET /v1/health</span>
+      </div>
+      <div class="cardBody">
+        <div class="row" style="align-items:end;">
+          <div>
+            <button class="btn btnPrimary" onclick="doHealth()">Check Health</button>
+            <div class="help">Connectivity and upstream status check.</div>
+          </div>
+          <div class="jsonTools" style="justify-content:flex-end;">
+            <button class="btn" type="button" onclick="copyPre('outHealth')">Copy JSON</button>
+          </div>
+        </div>
+        <pre id="outHealth" class="preWrap">{}</pre>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = "<?php echo htmlspecialchars($PDFJS_WORKER, ENT_QUOTES); ?>";
+
+let pollTimer=null;
+
+function pretty(o){ try{return JSON.stringify(o,null,2);}catch{return String(o);} }
+function scrollToId(id){ const el=document.getElementById(id); if(el) el.scrollIntoView({behavior:'smooth',block:'start'}); }
+
+function copyPre(id){
+  const el=document.getElementById(id);
+  if(!el) return;
+  const txt=el.textContent||'';
+  navigator.clipboard && navigator.clipboard.writeText(txt).catch(()=>{});
+}
+
+function showError(msg){
+  const b=document.getElementById('errBox');
+  if(!msg){ b.style.display='none'; b.textContent=''; return; }
+  b.style.display='block';
+  b.textContent=String(msg);
+}
+
+function setStatusUi(status){
+  const dot=document.getElementById('statusDot');
+  const val=document.getElementById('statusValue');
+  val.textContent=status?String(status):'—';
+  dot.className='dot';
+  const s=(status||'').toString().toLowerCase();
+  if(s==='signed') dot.classList.add('ok');
+  else if(s==='failed'||s==='expired'||s==='cancelled') dot.classList.add('bad');
+  else if(s) dot.classList.add('warn');
+}
+
+function setKpi(id,txt){
+  const el=document.getElementById(id);
+  el.textContent=(txt===null||txt===undefined||txt==='')?'—':String(txt);
+}
+
+async function postJson(action,payload){
+  const fd=new FormData();
+  fd.append('action',action);
+  for(const k in payload) fd.append(k,payload[k]);
+  const r=await fetch(location.href,{method:'POST',body:fd});
+  return await r.json();
+}
+
+async function doHealth(){
+  const out=document.getElementById('outHealth');
+  showError('');
+  out.textContent='...';
+  const data=await postJson('health',{});
+  out.textContent=pretty(data);
+}
+
+async function loadAudit(){
+  const out=document.getElementById('outAudit');
+  showError('');
+  out.textContent='...';
+  const jobId=document.getElementById('jobId').value.trim();
+  const data=await postJson('audit',{limit:'20',offset:'0',job_id:jobId||''});
+  out.textContent=pretty(data);
+}
+
+async function createJob(e){
+  e.preventDefault();
+  const out=document.getElementById('outCreate');
+  showError('');
+  out.textContent='Creating...';
+
+  // Discover node_id from local agent info server
+  let preferredNodeId = '';
+  const LOCAL_PORTS = [17700, 17656];
+  for (const port of LOCAL_PORTS) {
+    try {
+      const ir = await fetch(`http://127.0.0.1:${port}/info`, {signal: AbortSignal.timeout(1500)});
+      if (ir.ok) {
+        const info = await ir.json();
+        if (info && info.node_id) { preferredNodeId = info.node_id; break; }
+      }
+    } catch {}
+  }
+
+  const fd=new FormData(document.getElementById('formCreate'));
+  fd.append('action','create_job_upload');
+  if (!preferredNodeId) {
+    showError('Signing agent not detected on this computer. Please make sure KB DSC Signer is running and try again.');
+    out.textContent = '';
+    return;
+  }
+  fd.append('preferred_node_id', preferredNodeId);
+  const r=await fetch(location.href,{method:'POST',body:fd});
+  const data=await r.json();
+
+  out.textContent=pretty(data);
+  const jobId=data && data.upstream && data.upstream.job_id ? data.upstream.job_id : '';
+  if(jobId){
+    document.getElementById('jobId').value=jobId;
+    document.getElementById('btnDownload').disabled=true;
+    startPolling();
+    scrollToId('cardStatus');
+  }
+  return false;
+}
+
+// ---------- Local time helpers (browser/device) ----------
+function tzName(){
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; }
+}
+function fmtLocal(dt){
+  try{
+    // "dd-mm-yyyy hh:mm:ss" (like govt docs)
+    const pad=n=>String(n).padStart(2,'0');
+    return `${pad(dt.getDate())}-${pad(dt.getMonth()+1)}-${dt.getFullYear()} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+  }catch{
+    return '';
+  }
+}
+function localClockTick(){
+  const dt=new Date();
+  const el=document.getElementById('localClock');
+  if(el) el.value = fmtLocal(dt) + (tzName() ? ` (${tzName()})` : '');
+}
+setInterval(localClockTick, 1000);
+localClockTick();
+
+function toLocalDisplay(isoOrAny){
+  if(!isoOrAny) return '—';
+  const d=new Date(isoOrAny);
+  if(isNaN(d.getTime())) return String(isoOrAny);
+  return fmtLocal(d) + (tzName() ? ` (${tzName()})` : '');
+}
+
+async function checkStatus(){
+  const out=document.getElementById('outStatus');
+  showError('');
+  out.textContent='...';
+
+  const jobId=document.getElementById('jobId').value.trim();
+  if(!jobId){
+    out.textContent=pretty({ok:false,error:'job_id_required'});
+    showError('Please create a job first (Job ID is required).');
+    return;
+  }
+
+  const data=await postJson('job_status',{job_id:jobId});
+  const job = (data && data.upstream && data.upstream.job) ? data.upstream.job : null;
+  const st  = job && job.status ? job.status : null;
+
+  setStatusUi(st);
+
+  setKpi('kpiAttempts', (job && job.attempts!==undefined && job.max_attempts!==undefined) ? `${job.attempts} / ${job.max_attempts}` : '—');
+  setKpi('kpiNode', job && job.assigned_node_id ? job.assigned_node_id : '—');
+
+  // signer name from subject_dn (CN)
+  let signer='—';
+  if(job && job.signer_cert && job.signer_cert.subject_dn){
+    const dn=String(job.signer_cert.subject_dn);
+    const m=dn.match(/(?:^|,)\s*CN\s*=\s*([^,]+)/i) || dn.match(/^CN\s*=\s*([^,]+)/i);
+    signer = (m && m[1]) ? m[1].trim() : '—';
+  }
+  setKpi('kpiSigner', signer);
+
+  const signedAtRaw = (job && (job.signed_at||job.updated_at)) ? (job.signed_at||job.updated_at) : '';
+  setKpi('kpiSignedAtLocal', signedAtRaw ? toLocalDisplay(signedAtRaw) : '—');
+
+  const signed = (st||'').toString().toLowerCase()==='signed';
+  document.getElementById('btnDownload').disabled = !signed;
+
+  out.textContent = `STATUS: ${st||'—'}\n\n` + pretty(data);
+
+  if (['signed','failed','expired','cancelled'].includes((st||'').toString().toLowerCase())) stopPolling();
+}
+
+function startPolling(){ stopPolling(); pollTimer=setInterval(checkStatus,3000); checkStatus(); }
+function stopPolling(){ if(pollTimer) clearInterval(pollTimer); pollTimer=null; }
+
+function downloadPdf(){
+  const jobId=document.getElementById('jobId').value.trim();
+  if(!jobId) return alert('job_id required');
+
+  // Pass browser local time to server for stamping
+  const lt = fmtLocal(new Date());
+  const tz = tzName();
+
+  const qs = new URLSearchParams();
+  qs.set('action','download_pdf');
+  qs.set('job_id', jobId);
+  qs.set('local_time', lt);
+  if(tz) qs.set('tz', tz);
+
+  window.location.href = location.pathname + '?' + qs.toString();
+}
+
+// --------------------
+// Preview + Box placement
+// --------------------
+let chosenFile=null;
+const pdfInfo=document.getElementById('pdfInfo');
+
+function onFileChosen(file){
+  chosenFile=file||null;
+  document.getElementById('btnUploadPreview').disabled=!chosenFile;
+  document.getElementById('btnCreateJob').disabled=true;
+  document.getElementById('preview_id').value='';
+  clearBox();
+  pdfInfo.textContent = chosenFile ? `Selected: ${chosenFile.name} • Upload & Preview` : 'No PDF uploaded';
+}
+
+async function uploadAndPreview(){
+  if(!chosenFile) return alert('Select a PDF first.');
+  const btn=document.getElementById('btnUploadPreview');
+  btn.disabled=true; btn.textContent='Uploading...';
+  showError('');
+
+  const fd=new FormData();
+  fd.append('pdf',chosenFile);
+  fd.append('action','upload_preview');
+
+  const r=await fetch(location.href,{method:'POST',body:fd});
+  const data=await r.json();
+
+  if(!data || !data.ok){
+    btn.disabled=false; btn.textContent='Upload & Preview';
+    showError('Upload failed: ' + (data && data.error ? data.error : 'unknown'));
+    return;
+  }
+
+  document.getElementById('preview_id').value = data.preview_id;
+  await loadPdfFromUrl(data.preview_url);
+  document.getElementById('btnCreateJob').disabled=false;
+
+  btn.textContent='Uploaded ✓';
+  setTimeout(()=>{ btn.textContent='Upload & Preview'; btn.disabled=false; },900);
+}
+
+// PDF.js
+let pdfDoc=null, pdfPageNum=1, pdfTotalPages=0, renderScale=1.35;
+const canvas=document.getElementById('pdfCanvas');
+const stage=document.getElementById('stage');
+const sigBox=document.getElementById('sigBox');
+const sigLabel=document.getElementById('sigLabel');
+
+let dragging=false, dragRect=null;
+let presetWpt=200, presetHpt=60;
+
+function setBoxPreset(size){
+  if(size==='S'){ presetWpt=160; presetHpt=45; }
+  if(size==='M'){ presetWpt=200; presetHpt=60; }
+  if(size==='L'){ presetWpt=240; presetHpt=75; }
+  document.getElementById('vs_w').value=String(presetWpt);
+  document.getElementById('vs_h').value=String(presetHpt);
+}
+function clearBox(){ sigBox.style.display='none'; dragRect=null; }
+async function loadPdfFromUrl(url){
+  clearBox();
+  pdfInfo.textContent='Loading PDF...';
+  const loadingTask=pdfjsLib.getDocument(url);
+  pdfDoc=await loadingTask.promise;
+  pdfTotalPages=pdfDoc.numPages;
+  pdfPageNum=1;
+  document.getElementById('vs_page').value=String(pdfPageNum);
+  pdfInfo.textContent=`Loaded • ${pdfTotalPages} page(s)`;
+  await renderPage();
+}
+async function renderPage(){
+  if(!pdfDoc) return;
+  const page=await pdfDoc.getPage(pdfPageNum);
+  const viewport=page.getViewport({scale:renderScale});
+  const nativeViewport=page.getViewport({scale:1.0});
+  window.pdfPageWidthPt=nativeViewport.width;
+  window.pdfPageHeightPt=nativeViewport.height;
+  canvas.width=Math.floor(viewport.width);
+  canvas.height=Math.floor(viewport.height);
+  const ctx=canvas.getContext('2d',{alpha:false});
+  ctx.setTransform(1,0,0,1,0,0);
+  await page.render({canvasContext:ctx,viewport}).promise;
+  pdfInfo.textContent=`Page ${pdfPageNum}/${pdfTotalPages} • Zoom ${Math.round(renderScale*100)}%`;
+  document.getElementById('vs_page').value=String(pdfPageNum);
+}
+function prevPage(){ if(!pdfDoc||pdfPageNum<=1) return; pdfPageNum--; clearBox(); renderPage(); }
+function nextPage(){ if(!pdfDoc||pdfPageNum>=pdfTotalPages) return; pdfPageNum++; clearBox(); renderPage(); }
+function zoomIn(){ if(!pdfDoc) return; renderScale=Math.min(3.0,renderScale+0.15); clearBox(); renderPage(); }
+function zoomOut(){ if(!pdfDoc) return; renderScale=Math.max(0.6,renderScale-0.15); clearBox(); renderPage(); }
+
+function getCanvasPos(evt){
+  const rect=canvas.getBoundingClientRect();
+  return {x:(evt.clientX||0)-rect.left,y:(evt.clientY||0)-rect.top};
+}
+function clamp(v,min,max){ return Math.max(min,Math.min(max,v)); }
+
+function canvasPxToPdfPt(pxX,pxY){
+  const pageW=window.pdfPageWidthPt||canvas.width/renderScale;
+  const pageH=window.pdfPageHeightPt||canvas.height/renderScale;
+  const xPt=(pxX/canvas.width)*pageW;
+  const yPt=((canvas.height-pxY)/canvas.height)*pageH;
+  return {xPt,yPt};
+}
+function showOverlay(x1,y1,x2,y2){
+  const left=Math.min(x1,x2), top=Math.min(y1,y2);
+  const w=Math.abs(x2-x1), h=Math.abs(y2-y1);
+
+  const canvasRect=canvas.getBoundingClientRect();
+  const stageRect=stage.getBoundingClientRect();
+  const offsetX=(canvasRect.left-stageRect.left)+stage.scrollLeft;
+  const offsetY=(canvasRect.top-stageRect.top)+stage.scrollTop;
+
+  sigBox.style.display='block';
+  sigBox.style.left=(offsetX+left)+'px';
+  sigBox.style.top=(offsetY+top)+'px';
+  sigBox.style.width=Math.max(1,w)+'px';
+  sigBox.style.height=Math.max(1,h)+'px';
+}
+function applyRectToFields(x1,y1,x2,y2){
+  const leftPx=Math.min(x1,x2), rightPx=Math.max(x1,x2);
+  const topPx=Math.min(y1,y2), bottomPx=Math.max(y1,y2);
+  const ll=canvasPxToPdfPt(leftPx,bottomPx);
+  const ur=canvasPxToPdfPt(rightPx,topPx);
+
+  const llx=Math.round(ll.xPt), lly=Math.round(ll.yPt);
+  const urx=Math.round(ur.xPt), ury=Math.round(ur.yPt);
+
+  document.getElementById('vs_page').value=String(pdfPageNum);
+  document.getElementById('vs_x').value=String(Math.max(0,llx));
+  document.getElementById('vs_y').value=String(Math.max(0,lly));
+  document.getElementById('vs_w').value=String(Math.max(1,urx-llx));
+  document.getElementById('vs_h').value=String(Math.max(1,ury-lly));
+}
+function placePresetAt(pxX,pxY){
+  const wPx=presetWpt*renderScale, hPx=presetHpt*renderScale;
+  const x1=clamp(pxX,0,canvas.width-wPx);
+  const y1=clamp(pxY,0,canvas.height-hPx);
+  const x2=x1+wPx, y2=y1+hPx;
+  dragRect={x1,y1,x2,y2};
+  showOverlay(x1,y1,x2,y2);
+  applyRectToFields(x1,y1,x2,y2);
+}
+
+canvas.addEventListener('mousedown',(e)=>{
+  if(!pdfDoc) return;
+  const p=getCanvasPos(e);
+  if(p.x<0||p.y<0||p.x>canvas.width||p.y>canvas.height) return;
+  dragging=true;
+  dragRect={x1:p.x,y1:p.y,x2:p.x,y2:p.y};
+  showOverlay(dragRect.x1,dragRect.y1,dragRect.x2,dragRect.y2);
+});
+document.addEventListener('mousemove',(e)=>{
+  if(!dragging||!dragRect) return;
+  const p=getCanvasPos(e);
+  dragRect.x2=clamp(p.x,0,canvas.width);
+  dragRect.y2=clamp(p.y,0,canvas.height);
+  showOverlay(dragRect.x1,dragRect.y1,dragRect.x2,dragRect.y2);
+});
+document.addEventListener('mouseup',(e)=>{
+  if(!dragging||!dragRect) return;
+  dragging=false;
+  const w=Math.abs(dragRect.x2-dragRect.x1);
+  const h=Math.abs(dragRect.y2-dragRect.y1);
+  if(w<10||h<10){
+    const p=getCanvasPos(e);
+    placePresetAt(clamp(p.x,0,canvas.width),clamp(p.y,0,canvas.height));
+    return;
+  }
+  showOverlay(dragRect.x1,dragRect.y1,dragRect.x2,dragRect.y2);
+  applyRectToFields(dragRect.x1,dragRect.y1,dragRect.x2,dragRect.y2);
+});
+
+setBoxPreset('M');
+document.getElementById('btnCreateJob').disabled=true;
+</script>
+</body>
+</html>
